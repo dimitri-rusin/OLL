@@ -7,8 +7,8 @@ use std::{
 use bitvec::prelude::*;
 use pyo3::prelude::*;
 use rand::prelude::IteratorRandom;
-use rand::seq::SliceRandom;
 use rand::SeedableRng;
+use rand::seq::SliceRandom;
 use rand_mt::Mt64;
 use statrs::distribution::{Binomial, Discrete};
 
@@ -137,10 +137,20 @@ impl PartialEq for NEvals {
     }
 }
 
+// The original function remains unchanged
 fn random_bits<R: rand::Rng>(rng: &mut R, length: usize) -> BitVec {
+    random_bits_with_probability(rng, length, 0.5) // Calls the new function with a 50% probability
+}
+
+// New function with an additional probability parameter
+fn random_bits_with_probability<R: rand::Rng>(rng: &mut R, length: usize, probability: f64) -> BitVec {
     let arch_len = std::mem::size_of::<usize>() * 8;
     let word_length = (length - 1) / arch_len + 1;
-    let numbers = std::iter::repeat_with(|| rng.gen::<usize>()).take(word_length);
+
+    let numbers = std::iter::repeat_with(|| {
+        (0..arch_len).fold(0, |acc, _| (acc << 1) | rng.gen_bool(probability) as usize)
+    }).take(word_length);
+
     let mut bv = bitvec![usize, Lsb0;];
     bv.extend(numbers);
     bv.truncate(length);
@@ -221,6 +231,7 @@ fn crossover<R: rand::Rng>(
     (y, n_evals)
 }
 
+// Here, we do both rounds of (1+(lambda, lambda)).
 fn generation_full<R: rand::Rng>(
     x: BitVec,
     p: f64,
@@ -246,9 +257,9 @@ fn generation_with_lambda<R: rand::Rng>(x: BitVec, lbd: f64, rng: &mut R) -> (Bi
     generation_full(x, p, n_child, c, n_child, rng)
 }
 
-fn onell_lambda_rs(n: usize, lbds: Vec<f64>, seed: u64, max_evals: NEvals, record_log: bool) -> (NEvals, Option<FxLog>) {
+fn onell_lambda_rs(n: usize, lbds: Vec<f64>, seed: u64, max_evals: NEvals, record_log: bool, probability: f64) -> (NEvals, u64, Option<FxLog>) {
     let mut rng: Mt64 = SeedableRng::seed_from_u64(seed);
-    let mut x = random_bits(&mut rng, n);
+    let mut x = random_bits_with_probability(&mut rng, n, probability);
     let mut n_evals = NEvals::new();
     let mut logs;
     if record_log {
@@ -261,11 +272,15 @@ fn onell_lambda_rs(n: usize, lbds: Vec<f64>, seed: u64, max_evals: NEvals, recor
         logs_i.record(x.count_ones().try_into().unwrap(), &n_evals);
         logs = Some(logs_i);
     }
+
+    let mut num_timesteps: u64 = 0;
     while x.count_ones() != n && n_evals < max_evals {
         let lbd = lbds[x.count_ones()];
         let ne;
         (x, ne) = generation_with_lambda(x, lbd, &mut rng);
         n_evals += ne;
+        num_timesteps += 1;
+
         if record_log {
             let mut logs_i = logs.unwrap();
             logs_i.record(x.count_ones().try_into().unwrap(), &n_evals);
@@ -282,21 +297,22 @@ fn onell_lambda_rs(n: usize, lbds: Vec<f64>, seed: u64, max_evals: NEvals, recor
         } 
     }
     if record_log {
-        (n_evals, logs)
+        (n_evals, num_timesteps, logs)
     } else {
-        (n_evals, None)
+        (n_evals, num_timesteps, None)
     }
 }
 
+// the probability parameter represents the probability of getting a 1 in the generated bits
 #[pyfunction]
-fn onell_lambda(n: usize, lbds: Vec<f64>, seed: u64, max_evals: usize) -> PyResult<u64> {
-    let (n_evals, _) = onell_lambda_rs(n, lbds, seed, NEvals::new_with_value(max_evals.try_into().unwrap()), false);
-    Ok(n_evals.export())
+fn onell_lambda(n: usize, lbds: Vec<f64>, seed: u64, max_evals: usize, probability: f64) -> PyResult<(u64, u64)> {
+    let (n_evals, num_timesteps, _) = onell_lambda_rs(n, lbds, seed, NEvals::new_with_value(max_evals.try_into().unwrap()), false, probability);
+    Ok((n_evals.export(), num_timesteps))
 }
 
 #[pyfunction]
 fn onell_lambda_with_log(n: usize, lbds: Vec<f64>, seed: u64, max_evals: usize) -> PyResult<(u64, Vec<u64>, Vec<u64>)> {
-    let (n_evals, logs) = onell_lambda_rs(n, lbds, seed, NEvals::new_with_value(max_evals.try_into().unwrap()), true);
+    let (n_evals, num_timesteps, logs) = onell_lambda_rs(n, lbds, seed, NEvals::new_with_value(max_evals.try_into().unwrap()), true, 0.5);
     let (a, b) = logs.unwrap().export();
     Ok((n_evals.export(), a, b))
 }

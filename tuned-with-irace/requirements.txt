@@ -1,8 +1,0 @@
-numpy 
-matplotlib
-smac
-ConfigSpace
-maturin
-scipy 
-psutil
-rpy2
