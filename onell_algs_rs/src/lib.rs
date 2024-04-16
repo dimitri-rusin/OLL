@@ -250,14 +250,7 @@ fn generation_full<R: rand::Rng>(
     (x, n_evals)
 }
 
-fn generation_with_lambda<R: rand::Rng>(x: BitVec, lbd: f64, rng: &mut R) -> (BitVec, NEvals) {
-    let p = lbd / (x.len() as f64);
-    let c = 1.0 / (lbd as f64);
-    let n_child: usize = (lbd.round() as i64).try_into().unwrap();
-    generation_full(x, p, n_child, c, n_child, rng)
-}
-
-fn onell_lambda_rs(n: usize, lbds: Vec<f64>, seed: u64, max_evals: NEvals, record_log: bool, probability: f64) -> (NEvals, u64, Option<FxLog>) {
+fn onell_lambda_rs(n: usize, oll_parameters: Vec<(f64, usize, f64, usize)>, seed: u64, max_evals: NEvals, record_log: bool, probability: f64) -> (NEvals, u64, Option<FxLog>) {
     let mut rng: Mt64 = SeedableRng::seed_from_u64(seed);
     let mut x = random_bits_with_probability(&mut rng, n, probability);
     let mut n_evals = NEvals::new();
@@ -275,9 +268,9 @@ fn onell_lambda_rs(n: usize, lbds: Vec<f64>, seed: u64, max_evals: NEvals, recor
 
     let mut num_timesteps: u64 = 0;
     while x.count_ones() != n && n_evals < max_evals {
-        let lbd = lbds[x.count_ones()];
+        let (mutation_rate, mutation_size, crossover_rate, crossover_size) = oll_parameters[x.count_ones()];
         let ne;
-        (x, ne) = generation_with_lambda(x, lbd, &mut rng);
+        (x, ne) = generation_full(x, mutation_rate, mutation_size, crossover_rate, crossover_size, &mut rng);
         n_evals += ne;
         num_timesteps += 1;
 
@@ -305,35 +298,16 @@ fn onell_lambda_rs(n: usize, lbds: Vec<f64>, seed: u64, max_evals: NEvals, recor
 
 // the probability parameter represents the probability of getting a 1 in the generated bits
 #[pyfunction]
-fn onell_lambda(n: usize, lbds: Vec<f64>, seed: u64, max_evals: usize, probability: f64) -> PyResult<(u64, u64)> {
-    let (n_evals, num_timesteps, _) = onell_lambda_rs(n, lbds, seed, NEvals::new_with_value(max_evals.try_into().unwrap()), false, probability);
+fn onell_lambda(n: usize, oll_parameters: Vec<(f64, usize, f64, usize)>, seed: u64, max_evals: usize, probability: f64) -> PyResult<(u64, u64)> {
+    let (n_evals, num_timesteps, _) = onell_lambda_rs(n, oll_parameters, seed, NEvals::new_with_value(max_evals.try_into().unwrap()), false, probability);
     Ok((n_evals.export(), num_timesteps))
 }
 
 #[pyfunction]
-fn onell_lambda_with_log(n: usize, lbds: Vec<f64>, seed: u64, max_evals: usize) -> PyResult<(u64, Vec<u64>, Vec<u64>)> {
-    let (n_evals, num_timesteps, logs) = onell_lambda_rs(n, lbds, seed, NEvals::new_with_value(max_evals.try_into().unwrap()), true, 0.5);
+fn onell_lambda_with_log(n: usize, oll_parameters: Vec<(f64, usize, f64, usize)>, seed: u64, max_evals: usize) -> PyResult<(u64, Vec<u64>, Vec<u64>)> {
+    let (n_evals, _, logs) = onell_lambda_rs(n, oll_parameters, seed, NEvals::new_with_value(max_evals.try_into().unwrap()), true, 0.5);
     let (a, b) = logs.unwrap().export();
     Ok((n_evals.export(), a, b))
-}
-
-#[pyfunction]
-fn onell_dynamic_theory(n: usize, seed: u64, max_evals: usize) -> PyResult<u64> {
-    let max_evals = NEvals::new_with_value(max_evals.try_into().unwrap());
-    let mut rng: Mt64 = SeedableRng::seed_from_u64(seed);
-    let mut x = random_bits(&mut rng, n);
-    let mut n_evals = NEvals::new();
-    while x.count_ones() != n && n_evals < max_evals {
-        let lbd = (n as f64 / (n - x.count_ones()) as f64).sqrt();
-        let ne;
-        (x, ne) = generation_with_lambda(x, lbd, &mut rng);
-        n_evals += ne;
-    }
-
-    if x.count_ones() != n {
-        n_evals.make_big()
-    }
-    Ok(n_evals.export())
 }
 
 #[pyfunction]
@@ -397,7 +371,6 @@ fn onell_five_parameters(n: usize, seed: u64, max_evals: usize) -> PyResult<u64>
 fn onell_algs_rs(_py: Python, m: &PyModule) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(onell_lambda, m)?)?;
     m.add_function(wrap_pyfunction!(onell_lambda_with_log, m)?)?;
-    m.add_function(wrap_pyfunction!(onell_dynamic_theory, m)?)?;
     m.add_function(wrap_pyfunction!(onell_five_parameters, m)?)?;
     Ok(())
 }
