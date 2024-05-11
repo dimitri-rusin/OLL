@@ -1,11 +1,11 @@
 use std::{
-    cmp::{max_by, min_by},
     iter::{repeat, repeat_with},
     ops::{Add, AddAssign},
 };
 
 use bitvec::prelude::*;
 use pyo3::prelude::*;
+use rand::prelude::*;
 use rand::prelude::IteratorRandom;
 use rand::SeedableRng;
 use rand::seq::SliceRandom;
@@ -93,7 +93,7 @@ impl Add for NEvals {
 }
 
 impl AddAssign for NEvals {
-    fn add_assign(&mut self, rhs: Self) {   
+    fn add_assign(&mut self, rhs: Self) {
         *self = match self {
             Self::Inf => Self::Inf,
             Self::N(val1) => {
@@ -135,11 +135,6 @@ impl PartialEq for NEvals {
             }
         }
     }
-}
-
-// The original function remains unchanged
-fn random_bits<R: rand::Rng>(rng: &mut R, length: usize) -> BitVec {
-    random_bits_with_probability(rng, length, 0.5) // Calls the new function with a 50% probability
 }
 
 // New function with an additional probability parameter
@@ -223,7 +218,7 @@ fn crossover<R: rand::Rng>(
         .max_by(|x, y| x.count_ones().cmp(&y.count_ones()))
         .unwrap();
 
-    // By design, this returns x_prime when the two have the same fitness score. 
+    // By design, this returns x_prime when the two have the same fitness score.
     let y = [y, x_prime]
         .into_iter()
         .max_by(|x, y| x.count_ones().cmp(&y.count_ones()))
@@ -232,16 +227,17 @@ fn crossover<R: rand::Rng>(
 }
 
 // Here, we do both rounds of (1+(lambda, lambda)).
-fn generation_full<R: rand::Rng>(
+fn generation_full(
     x: BitVec,
     p: f64,
     n_child_mutate: usize,
     c: f64,
     n_child_crossover: usize,
-    rng: &mut R,
+    generation_seed: u64,
 ) -> (BitVec, NEvals) {
-    let (x_prime, ne1) = mutate(&x, p, n_child_mutate, rng);
-    let (y, ne2) = crossover(&x, x_prime, c, n_child_crossover, rng);
+    let mut rng: Mt64 = SeedableRng::seed_from_u64(generation_seed);
+    let (x_prime, ne1) = mutate(&x, p, n_child_mutate, &mut rng);
+    let (y, ne2) = crossover(&x, x_prime, c, n_child_crossover, &mut rng);
     let n_evals = ne1 + ne2;
     let x = [x, y]
         .into_iter()
@@ -270,7 +266,8 @@ fn onell_lambda_rs(n: usize, oll_parameters: Vec<(f64, usize, f64, usize)>, seed
     while x.count_ones() != n && n_evals < max_evals {
         let (mutation_rate, mutation_size, crossover_rate, crossover_size) = oll_parameters[x.count_ones()];
         let ne;
-        (x, ne) = generation_full(x, mutation_rate, mutation_size, crossover_rate, crossover_size, &mut rng);
+        let generation_seed = rng.gen::<u64>();
+        (x, ne) = generation_full(x, mutation_rate, mutation_size, crossover_rate, crossover_size, generation_seed);
         n_evals += ne;
         num_timesteps += 1;
 
@@ -287,7 +284,7 @@ fn onell_lambda_rs(n: usize, oll_parameters: Vec<(f64, usize, f64, usize)>, seed
             let mut logs_i = logs.unwrap();
             logs_i.record(x.count_ones().try_into().unwrap(), &n_evals);
             logs = Some(logs_i)
-        } 
+        }
     }
     if record_log {
         (n_evals, num_timesteps, logs)
@@ -304,66 +301,28 @@ fn onell_lambda(n: usize, oll_parameters: Vec<(f64, usize, f64, usize)>, seed: u
 }
 
 #[pyfunction]
+fn generation_full_py(
+    x: Vec<bool>,
+    p: f64,
+    n_child_mutate: usize,
+    c: f64,
+    n_child_crossover: usize,
+    generation_seed: u64,
+) -> PyResult<(Vec<bool>, u64)> {
+    let x_bitvec = x.iter().collect::<BitVec<_, Lsb0>>();
+    let (y, n_evals) = generation_full(x_bitvec, p, n_child_mutate, c, n_child_crossover, generation_seed);
+
+    let y_vec = y.into_iter().collect::<Vec<bool>>();
+    let n_evals_export = n_evals.export(); // Assuming n_evals is a single NEvals value and needs export to convert to u64
+
+    Ok((y_vec, n_evals_export))
+}
+
+#[pyfunction]
 fn onell_lambda_with_log(n: usize, oll_parameters: Vec<(f64, usize, f64, usize)>, seed: u64, max_evals: usize) -> PyResult<(u64, Vec<u64>, Vec<u64>)> {
     let (n_evals, _, logs) = onell_lambda_rs(n, oll_parameters, seed, NEvals::new_with_value(max_evals.try_into().unwrap()), true, 0.5);
     let (a, b) = logs.unwrap().export();
     Ok((n_evals.export(), a, b))
-}
-
-#[pyfunction]
-fn onell_five_parameters(n: usize, seed: u64, max_evals: usize) -> PyResult<u64> {
-    let max_evals = NEvals::new_with_value(max_evals.try_into().unwrap());
-    let mut rng: Mt64 = SeedableRng::seed_from_u64(seed);
-    let mut x = random_bits(&mut rng, n);
-    let mut n_evals = NEvals::new();
-    let alpha = 0.45;
-    let beta = 1.6;
-    let gamma = 1.0;
-    let a = 1.16;
-    let b = 0.7;
-    let mut lbd: f64 = 1.0;
-    let min_prob = 1.0 / (n as f64);
-    let max_prob = 0.99;
-    while x.count_ones() != n && n_evals < max_evals {
-        let p = alpha * lbd / (n as f64);
-        let p = {
-            if p < min_prob {
-                min_prob
-            } else if p > max_prob {
-                max_prob
-            } else {
-                p
-            }
-        };
-        let c = gamma / lbd;
-        let c = {
-            if c < min_prob {
-                min_prob
-            } else if c > max_prob {
-                max_prob
-            } else {
-                c
-            }
-        };
-
-        let n_child_mutate = (lbd.round() as i64).try_into().unwrap();
-        let n_child_crossover = ((lbd * beta).round() as i64).try_into().unwrap();
-        let f_x = x.count_ones();
-        let ne;
-        (x, ne) = generation_full(x, p, n_child_mutate, c, n_child_crossover, &mut rng);
-        if f_x < x.count_ones() {
-            lbd = max_by(b * lbd, 1.0, |x, y| x.partial_cmp(y).unwrap());
-        } else {
-            lbd = min_by(a * lbd, (n - 1) as f64, |x, y| x.partial_cmp(y).unwrap());
-        }
-        n_evals += ne;
-    }
-
-    if x.count_ones() != n {
-        n_evals.make_big();
-    }
-
-    return Ok(n_evals.export());
 }
 
 /// A Python module implemented in Rust.
@@ -371,6 +330,6 @@ fn onell_five_parameters(n: usize, seed: u64, max_evals: usize) -> PyResult<u64>
 fn onell_algs_rs(_py: Python, m: &PyModule) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(onell_lambda, m)?)?;
     m.add_function(wrap_pyfunction!(onell_lambda_with_log, m)?)?;
-    m.add_function(wrap_pyfunction!(onell_five_parameters, m)?)?;
+    m.add_function(wrap_pyfunction!(generation_full_py, m)?)?;
     Ok(())
 }
