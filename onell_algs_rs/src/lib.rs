@@ -226,7 +226,7 @@ fn crossover<R: rand::Rng>(
     (y, n_evals)
 }
 
-// Here, we do both rounds of (1+(lambda, lambda)).
+// Do both rounds of (1+(lambda, lambda)).
 fn generation_full(
     x: BitVec,
     p: f64,
@@ -244,6 +244,35 @@ fn generation_full(
         .max_by(|x, y| x.count_ones().cmp(&y.count_ones()))
         .unwrap();
     (x, n_evals)
+}
+
+// Do both rounds of (1+(lambda, lambda)) repeatedly until current fitness has been overcome.
+fn generation_full_until_improving_fitness(
+    x: BitVec,
+    p: f64,
+    n_child_mutate: usize,
+    c: f64,
+    n_child_crossover: usize,
+    generation_seed: u64,
+) -> (BitVec, NEvals) {
+    let mut rng: Mt64 = SeedableRng::seed_from_u64(generation_seed);
+    let mut x_current = x;
+    let mut n_evals = NEvals::new();
+    let current_fitness = x_current.count_ones();
+
+    loop {
+        let (x_prime, ne1) = mutate(&x_current, p, n_child_mutate, &mut rng);
+        n_evals += ne1;
+        let (y, ne2) = crossover(&x_current, x_prime, c, n_child_crossover, &mut rng);
+        n_evals += ne2;
+        let new_fitness = y.count_ones();
+
+        if new_fitness > current_fitness {
+            return (y, n_evals); // Improvement found, return the new configuration
+        } else {
+            x_current = y; // No improvement, repeat the process with the new result
+        }
+    }
 }
 
 fn onell_lambda_rs(n: usize, oll_parameters: Vec<(f64, usize, f64, usize)>, seed: u64, max_evals: NEvals, record_log: bool, probability: f64) -> (NEvals, u64, Option<FxLog>) {
@@ -319,6 +348,24 @@ fn generation_full_py(
 }
 
 #[pyfunction]
+fn generation_full_until_improving_fitness_py(
+    x: Vec<bool>,
+    p: f64,
+    n_child_mutate: usize,
+    c: f64,
+    n_child_crossover: usize,
+    generation_seed: u64,
+) -> PyResult<(Vec<bool>, u64)> {
+    let x_bitvec = x.iter().collect::<BitVec<_, Lsb0>>();
+    let (y, n_evals) = generation_full_until_improving_fitness(x_bitvec, p, n_child_mutate, c, n_child_crossover, generation_seed);
+
+    let y_vec = y.into_iter().collect::<Vec<bool>>();
+    let n_evals_export = n_evals.export(); // Assuming n_evals is a single NEvals value and needs export to convert to u64
+
+    Ok((y_vec, n_evals_export))
+}
+
+#[pyfunction]
 fn onell_lambda_with_log(n: usize, oll_parameters: Vec<(f64, usize, f64, usize)>, seed: u64, max_evals: usize) -> PyResult<(u64, Vec<u64>, Vec<u64>)> {
     let (n_evals, _, logs) = onell_lambda_rs(n, oll_parameters, seed, NEvals::new_with_value(max_evals.try_into().unwrap()), true, 0.5);
     let (a, b) = logs.unwrap().export();
@@ -331,5 +378,6 @@ fn onell_algs_rs(_py: Python, m: &PyModule) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(onell_lambda, m)?)?;
     m.add_function(wrap_pyfunction!(onell_lambda_with_log, m)?)?;
     m.add_function(wrap_pyfunction!(generation_full_py, m)?)?;
+    m.add_function(wrap_pyfunction!(generation_full_until_improving_fitness_py, m)?)?;
     Ok(())
 }
